@@ -54,20 +54,19 @@ The frontend dev server proxies `/api` to the backend — no CORS config needed 
 
 ## 4. Database setup
 
-Dev uses SQLite out of the box (`backend/prisma/dev.db`, gitignored) — zero
-config needed beyond `npx prisma migrate dev`.
+The schema's datasource is PostgreSQL (see `backend/prisma/schema.prisma`), and the
+initial migration is already committed at
+`backend/prisma/migrations/20260831000000_init/`, covering every model
+(`User`, `Video`, `GenerationJob`, `CreditTransaction`, `Subscription`, `Payment`).
 
-For production, switch to PostgreSQL:
-
-1. In `backend/prisma/schema.prisma`, change the datasource provider from
-   `sqlite` to `postgresql`.
-2. Set `DATABASE_URL` in your production environment to a Postgres connection
-   string, e.g. `postgresql://user:pass@host:5432/mashal`.
-3. Run `npx prisma migrate deploy`.
-
-All models (`User`, `Video`, `GenerationJob`, `CreditTransaction`, `Subscription`,
-`Payment`) are already written against the Prisma schema, so this is the only change
-needed to move databases.
+- **Production**: set `DATABASE_URL` to your Postgres connection string and run
+  `npx prisma migrate deploy` (the backend's `npm start` already does this
+  automatically on every boot — see section 11).
+- **Local dev without a Postgres instance**: either point `DATABASE_URL` at a local
+  or free-tier Postgres (e.g. one from Render, Neon, or Supabase) and run
+  `npx prisma migrate deploy`, or temporarily switch the datasource `provider` in
+  `schema.prisma` back to `sqlite`, set `DATABASE_URL="file:./dev.db"`, and run
+  `npx prisma migrate dev --name init` (don't commit that provider change).
 
 ## 5. Environment variables
 
@@ -150,17 +149,70 @@ cd frontend && npm run dev    # app on :5173
 
 ## 11. Production deployment
 
-- Build the frontend: `npm run build` in `frontend/` → static files in `frontend/dist`,
-  deployable to any static host (Vercel, Netlify, S3+CDN, etc).
-- Build the backend: `npm run build` in `backend/` → `backend/dist`, run with
-  `npm start`. Deploy behind HTTPS (Render, Fly.io, Railway, a container on any cloud).
-- Point `DATABASE_URL` at your Postgres instance and run `npx prisma migrate deploy`.
-- Set every secret in section 5 in your host's environment variable manager — never in
-  the repo.
-- Put real object storage credentials in `STORAGE_*` so uploads/videos survive
-  restarts and scale past a single disk.
+This repo is configured to deploy as **one service**: the Express backend also serves
+the built frontend (see the static-file block near the end of `backend/src/index.ts`).
+That keeps everything on a single origin, which matters for auth — cookies stay
+first-party, including on Safari/iOS, where cross-site cookies are blocked by default.
 
-## 12. What's intentionally NOT included yet
+- `render.yaml` at the repo root is a [Render Blueprint](https://render.com/docs/blueprint-spec)
+  that provisions this web service plus a managed Postgres database automatically —
+  see section 12 for the deploy walkthrough (including from a phone, no CLI needed).
+- The build runs `frontend`'s `vite build` then `backend`'s `tsc` build; the start
+  command runs `prisma migrate deploy` (applying the committed migration) and then
+  starts the server.
+- Set every secret in section 5 in your host's environment variable manager — never in
+  the repo. `render.yaml` marks each one `sync: false` so Render prompts for it.
+- The video provider, Google sign-in, and payments stay in their "not configured"
+  state until you add their credentials — nothing here is required to deploy.
+- Local disk storage for uploads (the dev fallback) does **not** persist across
+  deploys or restarts on most hosts, including Render. Put real object storage
+  credentials in `STORAGE_*` before you rely on uploads/videos surviving a redeploy.
+- Deploying frontend and backend as two separate services (e.g. frontend on a static
+  host, backend elsewhere) is also possible — set `VITE_API_URL` to the backend's URL
+  and `APP_URL`/CORS accordingly — but then cross-site cookie behavior on Safari/iOS
+  needs its own handling, which the single-service setup above avoids entirely.
+
+## 12. Deploying from an iPhone (GitHub → Render, no computer needed)
+
+This needs the GitHub app and Safari or Chrome on the iPhone — no terminal, no SSH,
+no desktop at any point.
+
+1. **Get the code onto GitHub.**
+   - If you haven't already, create a new repository at github.com/new (the mobile
+     web site works fine for this) and upload this project to it. The simplest path
+     from a phone: install the **GitHub** app, or use github.com's "Add file → Upload
+     files" in Safari/Chrome to upload the whole `mashal-ai-video` folder.
+   - Make sure `.env` files are **not** among the uploaded files — only `.env.example`
+     should be there. (`.gitignore` already excludes `.env`/`.env.local` if you're
+     pushing via git rather than a manual upload.)
+2. **Create a Render account.** Go to render.com in Safari, sign up (GitHub sign-in is
+   the fastest — no credit card required for the free tier).
+3. **Connect the repo.** In the Render dashboard: **New → Blueprint**. Authorize
+   Render to access your GitHub account, then pick the `mashal-ai-video` repository.
+   Render finds `render.yaml` at the repo root automatically and shows you the
+   web service + Postgres database it's about to create.
+4. **Fill in the prompted values.** Render will ask for each `sync: false` variable
+   from `render.yaml`. At minimum, leave `APP_URL` and `API_URL` blank for now — you'll
+   fill those in after step 5 once you know the live URL. Everything else (video
+   provider, Google OAuth, storage, payments) can stay blank; the app runs fine
+   without them.
+5. **Deploy.** Tap **Apply** / **Create Blueprint**. Render builds and deploys — this
+   takes a few minutes the first time. When it finishes, Render shows your live URL,
+   something like `https://mashal-ai-video.onrender.com`.
+6. **Set `APP_URL` and `API_URL`.** Go to the web service → **Environment**, set both
+   variables to that exact URL (e.g. `https://mashal-ai-video.onrender.com`, no
+   trailing slash), and save — Render redeploys automatically with the new values.
+7. **Visit the URL.** The site should load, and sign-up/login/studio/dashboard should
+   all work immediately (video generation will correctly say "not configured" until
+   you add a real provider — see section 7).
+
+Notes for the free tier: the web service spins down after 15 minutes idle (the next
+visit takes 30–60 seconds to wake up), and the free Postgres database expires 30 days
+after creation with a 14-day grace period — export or upgrade to a paid Postgres plan
+before then if you want to keep the data. Both are one-tap upgrades from the Render
+dashboard whenever you're ready, from the same phone.
+
+## 13. What's intentionally NOT included yet
 
 Per the "no fake functionality" requirement, these are scaffolded but not
 activated, since activating them requires your own credentials:
