@@ -1,0 +1,174 @@
+# Mashal AI Video
+
+Turn Your Ideas Into Amazing Videos — an AI video generation platform. Users write a
+prompt (or upload an image / script), choose style and settings, and the app hands the
+job to a pluggable AI video provider, tracks it as a real asynchronous job, and saves
+the finished video to the user's library.
+
+This is a real, working full-stack application — not a mockup. **No part of the UI
+fakes a successful generation.** If no video provider is configured, the app tells the
+user exactly that, everywhere it matters, and the rest of the platform (accounts,
+dashboard, credits, library) still works normally.
+
+---
+
+## 1. Technology stack
+
+| Layer | Choice |
+|---|---|
+| Frontend | React + TypeScript + Vite + Tailwind CSS |
+| Backend | Node.js + TypeScript + Express |
+| ORM / DB | Prisma — SQLite for local dev, PostgreSQL for production (one env var) |
+| Auth | Email/password (bcrypt + signed httpOnly session cookie) + Google OAuth |
+| Storage | Storage abstraction (local disk in dev; swap in S3/R2 for prod) |
+| Video provider | Pluggable `VideoProvider` interface; ships with a "not configured" No-Op provider and an optional fal.ai provider |
+
+## 2. Project structure
+
+```
+mashal-ai-video/
+  backend/          Express API, Prisma schema, provider abstraction, jobs
+  frontend/          React app (landing, auth, dashboard, studio, library, admin)
+```
+
+## 3. Installation
+
+Requires Node.js 18+.
+
+```bash
+# Backend
+cd backend
+npm install
+cp .env.example .env      # fill in values, see section 5
+npx prisma migrate dev --name init
+npm run dev                # http://localhost:4000
+
+# Frontend (in a second terminal)
+cd frontend
+npm install
+cp .env.example .env
+npm run dev                # http://localhost:5173
+```
+
+The frontend dev server proxies `/api` to the backend — no CORS config needed locally.
+
+## 4. Database setup
+
+Dev uses SQLite out of the box (`backend/prisma/dev.db`, gitignored) — zero
+config needed beyond `npx prisma migrate dev`.
+
+For production, switch to PostgreSQL:
+
+1. In `backend/prisma/schema.prisma`, change the datasource provider from
+   `sqlite` to `postgresql`.
+2. Set `DATABASE_URL` in your production environment to a Postgres connection
+   string, e.g. `postgresql://user:pass@host:5432/mashal`.
+3. Run `npx prisma migrate deploy`.
+
+All models (`User`, `Video`, `GenerationJob`, `CreditTransaction`, `Subscription`,
+`Payment`) are already written against the Prisma schema, so this is the only change
+needed to move databases.
+
+## 5. Environment variables
+
+See `backend/.env.example` and `frontend/.env.example` for the full list. Never commit
+a real `.env` file — both are already in `.gitignore`.
+
+Key backend variables:
+
+- `DATABASE_URL` — SQLite file path in dev, Postgres URL in prod.
+- `SESSION_SECRET` — long random string used to sign session cookies. Generate with
+  `openssl rand -base64 48`.
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — from the Google Cloud Console, only
+  needed once you enable Google sign-in.
+- `FAL_API_KEY` — **this is where you add your AI video provider's API key.** Leave it
+  unset and the app runs fine with video generation showing as "not configured."
+- `STORAGE_*` — object storage credentials for videos/thumbnails/uploads. Local dev
+  falls back to disk storage under `backend/uploads/` if these are unset.
+- `PAYMENT_SECRET_KEY` — set this once you wire up Stripe or another provider (see
+  section 8). Left unset, the pricing page still renders; checkout is disabled.
+
+## 6. Authentication setup
+
+- Email/password auth is fully implemented: registration, login, logout,
+  forgot/reset password, and session cookies (httpOnly, signed, `SameSite=Lax`).
+- Google sign-in uses the standard OAuth 2.0 authorization-code flow. To enable it:
+  create OAuth credentials in Google Cloud Console, set the redirect URI to
+  `{API_URL}/api/auth/google/callback`, and put the client ID/secret in `.env`.
+  Until you do this, the "Continue with Google" button shows a clear
+  "Google sign-in is not configured" message instead of failing silently.
+
+## 7. Adding a real AI video provider
+
+The app talks to video providers only through `backend/src/providers/VideoProvider.ts`:
+
+```ts
+interface VideoProvider {
+  generateVideo(job: GenerationRequest): Promise<{ providerJobId: string }>;
+  getGenerationStatus(providerJobId: string): Promise<ProviderStatus>;
+  cancelGeneration(providerJobId: string): Promise<void>;
+  getResult(providerJobId: string): Promise<{ videoUrl: string; thumbnailUrl?: string }>;
+}
+```
+
+- `providers/NoOpProvider.ts` is the default — it's what makes the app correctly say
+  "Video provider is not configured yet" instead of faking a result.
+- `providers/FalProvider.ts` is a real, isolated starting point for fal.ai. **Before
+  using it in production, check fal.ai's current API docs** for the exact
+  model/endpoint you want (text-to-video vs image-to-video models change), and fill in
+  the request/response mapping — the shape of that mapping is intentionally left
+  explicit rather than guessed, so you don't ship against invented endpoints.
+- Set `FAL_API_KEY` and `VIDEO_PROVIDER=fal` in `.env` to activate it. The key never
+  reaches the frontend — all provider calls happen server-side.
+- To add another provider, implement the same interface and register it in
+  `providers/index.ts`.
+
+## 8. Adding a payment provider
+
+`Payment` and `Subscription` Prisma models, plus webhook-ready routes, are in place,
+but no payment processor is wired up — the spec explicitly asks not to fake payment
+confirmation or build custom card handling. To add Stripe:
+
+1. `npm install stripe` in `backend/`.
+2. Create `backend/src/services/paymentService.ts` implementing checkout-session
+   creation and webhook signature verification, using `PAYMENT_SECRET_KEY`.
+3. Only mark a `Payment` row `succeeded` inside the verified webhook handler — never
+   from a client-side call.
+
+## 9. Admin setup
+
+Set a user's `role` to `admin` directly in the database (or via
+`npx prisma studio`) to grant access to `/admin`. Every admin API route re-checks the
+role server-side — hiding the nav link is not the authorization mechanism.
+
+## 10. Running locally
+
+```bash
+cd backend && npm run dev     # API on :4000
+cd frontend && npm run dev    # app on :5173
+```
+
+## 11. Production deployment
+
+- Build the frontend: `npm run build` in `frontend/` → static files in `frontend/dist`,
+  deployable to any static host (Vercel, Netlify, S3+CDN, etc).
+- Build the backend: `npm run build` in `backend/` → `backend/dist`, run with
+  `npm start`. Deploy behind HTTPS (Render, Fly.io, Railway, a container on any cloud).
+- Point `DATABASE_URL` at your Postgres instance and run `npx prisma migrate deploy`.
+- Set every secret in section 5 in your host's environment variable manager — never in
+  the repo.
+- Put real object storage credentials in `STORAGE_*` so uploads/videos survive
+  restarts and scale past a single disk.
+
+## 12. What's intentionally NOT included yet
+
+Per the "no fake functionality" requirement, these are scaffolded but not
+activated, since activating them requires your own credentials:
+
+- A live video provider call (ships as "not configured" until you add `FAL_API_KEY`).
+- Google sign-in (until you add OAuth credentials).
+- Real payment processing (until you wire a processor into `paymentService.ts`).
+- Production object storage (falls back to local disk in dev).
+
+Everything else — accounts, sessions, the full video studio UI, async job tracking,
+server-side credits, the video library, and the admin panel — is real and working.
